@@ -7,10 +7,10 @@ Lightweight NOS system built around statebags. Simple, clean, and designed to be
 ## **Features:**
 
 - [x] Restart-safe <br>
-- [x] Smooth nitrous system <br>
+- [x] Strict stagebag compatible <br>
+- [x] Synced particle effects <br>
 - [x] Bottle removal (radial menu) <br>
 - [x] Configurable refill stations <br>
-- [x] Synced particle effects <br>
 - [ ] Configurable boost curves <br>
 - [ ] Bottle pressure simulation <br>
 - [ ] Persistence abstraction <br>
@@ -33,7 +33,7 @@ Entity(cache.vehicle).state.nitrous
 ```lua
     ["nitrous"] = {
         label = "Nitrous",
-        weight = 1000,
+        weight = 100,
         stack = true,
         close = true,
         description = "Bottle of nitrous oxide",

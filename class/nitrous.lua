@@ -1,8 +1,11 @@
 local Settings <const> = lib.load('data.settings')
+local Progress <const> = lib.load('data.progress')
+local Notify <const> = lib.load('data.notify')
+local Inventory <const> = exports.ox_inventory
 
 ---@class privateNitrousData
 ---@field active boolean
----@field vehicles table
+---@field vehicles table<number, { bones: number[], particles: number[] }>
 
 ---@class Nitrous : OxClass
 ---@field keybind CKeybind
@@ -13,7 +16,6 @@ local Nitrous = lib.class('malice_nitro')
 function Nitrous:constructor()
     self.private.active = false
     self.private.vehicles = {}
-    self:addVehicle(cache.vehicle)
 
     self.keybind = lib.addKeybind({
         name = 'nitrous',
@@ -23,25 +25,31 @@ function Nitrous:constructor()
         onPressed = function()
             if self:isActive() then return end
             if not self:isVehicleValid() then return end
+            if cache.seat ~= -1 then return end
             if not GetIsVehicleEngineRunning(cache.vehicle) then return end
 
             local nitro = Entity(cache.vehicle).state.nitrous
-
-            if nitro and nitro > 0.0 then
+            if nitro or nitro > 0.0 then
                 self:start()
             end
         end,
         onReleased = function()
             if not self:isActive() then return end
-            if not self:isVehicleValid() then return end
 
-            local nitro = Entity(cache.vehicle).state.nitrous
-
-            if nitro and nitro > 0.0 then
-                self:stop(false)
-            end
+            self:stop(true)
         end
     })
+
+    if cache.seat == -1 and self:isVehicleValid() then
+        self:setExhaustBones(cache.vehicle, true)
+
+        local nitro = Entity(cache.vehicle).state.nitrous
+
+        if nitro and nitro > 0.0 then
+            self:addRadialItem()
+            self.keybind:disable(false)
+        end
+    end
 end
 
 ---@return boolean active
@@ -49,6 +57,8 @@ function Nitrous:isActive() return self.private.active end
 
 ---@return boolean valid
 function Nitrous:isVehicleValid()
+    if not cache.vehicle or not DoesEntityExist(cache.vehicle) then return false end
+
     local class = GetVehicleClass(cache.vehicle)
     local model = GetEntityModel(cache.vehicle)
     local electric = GetIsVehicleElectric(model)
@@ -56,92 +66,119 @@ function Nitrous:isVehicleValid()
     return class <= 9 and not electric
 end
 
----@return boolean found
----@return boolean added
-function Nitrous:addVehicle(vehicle)
-    if not vehicle or not DoesEntityExist(vehicle) then return false, false end
+function Nitrous:addRadialItem()
+    lib.addRadialItem({
+        {
+            id = 'unload_nitrous',
+            label = locale('radial.unload'),
+            icon = 'hand-holding-droplet',
+            onSelect = function()
+                lib.removeRadialItem('unload_nitrous')
+                self.keybind:disable(true)
 
-    if self.private.vehicles[cache.vehicle] then return true, false end
+                if lib.progressCircle(Progress['uninstall']) then
+                    TriggerServerEvent('malice_nitrous:server:unload')
+                else
+                    self:addRadialItem()
+                    self.keybind:disable(false)
+                end
+            end
+        }
+    })
+end
 
-    self.private.vehicles[vehicle] = {
-        bones = {},
-        particles = {}
-    }
+---@param vehicle number | false
+---@param state boolean
+function Nitrous:setExhaustBones(vehicle, state)
+    if not vehicle or not DoesEntityExist(vehicle) then return end
 
-    for i = 1, 16 do
-        local name = i == 1 and "exhaust" or ("exhaust_%d"):format(i)
-        local index = GetEntityBoneIndexByName(vehicle, name)
+    if state and not self.private.vehicles[vehicle] then
+        self.private.vehicles[vehicle] = { bones = {}, particles = {} }
 
-        if index ~= -1 then
-            table.insert(self.private.vehicles[vehicle].bones, index)
+        for i = 1, 16 do
+            local name = i == 1 and "exhaust" or ("exhaust_%d"):format(i)
+            local index = GetEntityBoneIndexByName(vehicle, name)
+
+            if index ~= -1 then
+                table.insert(self.private.vehicles[vehicle].bones, index)
+            end
         end
-    end
-
-    if #self.private.vehicles[vehicle].bones == 0 then
+    elseif not state then
         self.private.vehicles[vehicle] = nil
-
-        return false, false
-    else
-        return false, true
     end
 end
 
-function Nitrous:removeVehicle(vehicle)
-    if not vehicle then return end
+function Nitrous:load()
+    if not cache.vehicle or cache.seat ~= -1 then return false end
+    if Inventory:Search('count', 'nitrous') < 1 then return false end
+    if not self:isVehicleValid() then lib.notify(Notify['not_valid']) return false end
+    if Settings.needTurbo and not IsToggleModOn(cache.vehicle, 18) then lib.notify(Notify['no_turbo']) return false end
 
-    self:stop(false)
+    local nitro = Entity(cache.vehicle).state.nitrous
+    if nitro and nitro > 0.0 then lib.notify(Notify['is_loaded']) return false end
 
-    if self.private.vehicles[vehicle] then
-        self.private.vehicles[vehicle] = nil
+    if lib.progressCircle(Progress['install']) then
+        self:addRadialItem()
+        self.keybind:disable(false)
+
+        return true
+    else
+        return false
     end
 end
 
 function Nitrous:start()
+    if self.private.active then return end
+
+    local success = lib.callback.await('malice_nitro:server:start')
+    if not success then return end
+
     self.private.active = true
-    Entity(cache.vehicle).state:set('flame', true, true)
-    SetVehicleBoostActive(cache.vehicle, true)
-    SetVehicleEnginePowerMultiplier(cache.vehicle, Settings.multiplier.enginePower)
-    SetVehicleEngineTorqueMultiplier(cache.vehicle, Settings.multiplier.engineTorque)
 
     CreateThread(function()
+        SetVehicleBoostActive(cache.vehicle, true)
+
         while self:isActive() do
-            local nitro = Entity(cache.vehicle).state.nitrous
+            SetVehicleEnginePowerMultiplier(cache.vehicle, Settings.multiplier.enginePower)
+            SetVehicleEngineTorqueMultiplier(cache.vehicle, Settings.multiplier.engineTorque)
 
-            if nitro > 0.0 then
-                Entity(cache.vehicle).state:set('nitrous', nitro - Settings.depletionRate, true)
-            else
-                self:stop(true)
-                self.keybind:disable(true)
-            end
-
-            Wait(Settings.depletionTick)
+            Wait(0)
         end
     end)
 end
 
----@param item boolean
-function Nitrous:stop(item)
-    self.private.active = false
-    Entity(cache.vehicle).state:set('flame', false, true)
-    SetVehicleBoostActive(cache.vehicle, false)
-    SetVehicleEnginePowerMultiplier(cache.vehicle, 0.0)
-    SetVehicleEngineTorqueMultiplier(cache.vehicle, 0.0)
+---@param notifyServer boolean
+function Nitrous:stop(notifyServer)
+    if not self.private.active then return end
 
-    if item and Settings.giveEmpty then
-        TriggerServerEvent('malice_nitrous:server:giveEmpty', VehToNet(cache.vehicle))
+    if not cache.vehicle then
+        self.private.active = false
+        return
+    end
+
+    self.private.active = false
+
+    if notifyServer then
+        lib.callback.await('malice_nitro:server:stop')
+    end
+
+    if cache.vehicle then
+        local nitro = Entity(cache.vehicle).state.nitrous
+        if nitro and nitro <= 0.0 then
+            self.keybind:disable(true)
+        end
     end
 end
 
+---@param vehicle number
 function Nitrous:startFlame(vehicle)
-    local found, added = self:addVehicle(vehicle)
-    if not found and not added then return end
-
+    self:setExhaustBones(vehicle, true)
     lib.requestNamedPtfxAsset(Settings.particle.dict)
 
     for _, bone in ipairs(self.private.vehicles[vehicle].bones) do
         UseParticleFxAssetNextCall(Settings.particle.dict)
 
-        local particle = StartNetworkedParticleFxLoopedOnEntityBone(
+        local particle = StartParticleFxLoopedOnEntityBone(
             Settings.particle.fx,
             vehicle,
             0.0,
@@ -159,17 +196,20 @@ function Nitrous:startFlame(vehicle)
 
         self.private.vehicles[vehicle].particles[#self.private.vehicles[vehicle].particles + 1] = particle
     end
+
+    RemoveNamedPtfxAsset(Settings.particle.dict)
 end
 
+---@param vehicle number
 function Nitrous:stopFlame(vehicle)
-    if not self.private.vehicles[vehicle] then return end
+    local data = self.private.vehicles[vehicle]
+    if not data then return end
 
     for _, particle in ipairs(self.private.vehicles[vehicle].particles) do
         StopParticleFxLooped(particle, true)
     end
 
-    RemoveNamedPtfxAsset(Settings.particle.dict)
-    self.private.vehicles[vehicle].particles = {}
+    self:setExhaustBones(vehicle, false)
 end
 
 return Nitrous
